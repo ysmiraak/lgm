@@ -76,7 +76,7 @@ class Rbm(Record):
             wtr.add_summary(self.fit_neg(sess, v, lr), self.step)
         return v
 
-    def pcd(self, sess, wtr, batchit, steps, step_plot, lr= 0.01, v= None):
+    def pcd(self, sess, wtr, batchit, steps, step_plot, k= 1, lr= 0.01, v= None):
         if v is None: v = next(batchit)
         for step in range(1, 1 + steps):
             self.step += 1
@@ -92,8 +92,8 @@ class Rbm(Record):
         if v is None: v = np.random.randint(2, size= (n, self.dv), dtype= np.bool)
         while True:
             for _ in range(k):
-                h = self.activate_h(v, sess)
-                v = self.activate_v(h, sess)
+                h = self.activate_h(sess, v)
+                v = self.activate_v(sess, h)
             yield h, v
 
     def gen_v(self, sess, k= 1, v= None, n= None):
