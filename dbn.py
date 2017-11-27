@@ -1,4 +1,4 @@
-from functools import reduce
+from functools import reduce, partial
 from itertools import product
 from rbm import Rbm
 from utils import np, tf, tile
@@ -45,12 +45,13 @@ if False:
     ##############
     # train rbm2 #
     ##############
-    batchit2 = rbm1.gen_h(sess, v= v)
+    # batchit2 = rbm1.gen_h(sess, v= v)
+    batchit2 = map(partial(rbm1.activate_h, sess), batchit1)
     rbm2.plot = plot_fn(rbm2, rbm1)
 
     wtr = tf.summary.FileWriter("log/dbn/train")
     v = next(batchit2)
-    v = rbm2.pcd(sess, wtr, batchit2, steps= 360000, step_plot= 60000, lr= 0.01, v= v)
+    v = rbm2.pcd(sess, wtr, batchit2, steps= 60000, step_plot= 10000, lr= 0.01, v= v)
     v = rbm2.pcd(sess, wtr, batchit2, steps= 12000, step_plot= 3000, lr= 0.001, v= v)
     wtr.close()
 
@@ -60,12 +61,13 @@ if False:
     ##############
     # train rbm3 #
     ##############
-    batchit3 = rbm2.gen_h(sess, v= v)
+    # batchit3 = rbm2.gen_h(sess, v= v)
+    batchit3 = map(partial(rbm2.activate_h, sess), batchit2)
     rbm3.plot = plot_fn(rbm3, rbm2, rbm1)
 
     wtr = tf.summary.FileWriter("log/dbn/train")
     v = next(batchit3)
-    v = rbm3.pcd(sess, wtr, batchit3, steps= 300000, step_plot= 50000, lr= 0.01, v= v)
+    v = rbm3.pcd(sess, wtr, batchit3, steps= 60000, step_plot= 10000, lr= 0.01, v= v)
     v = rbm3.pcd(sess, wtr, batchit3, steps= 12000, step_plot= 3000, lr= 0.001, v= v)
     wtr.close()
 
@@ -75,12 +77,13 @@ if False:
     ##############
     # train rbm4 #
     ##############
-    batchit4 = rbm3.gen_h(sess, v= v)
+    # batchit4 = rbm3.gen_h(sess, v= v)
+    batchit4 = map(partial(rbm3.activate_h, sess), batchit3)
     rbm4.plot = plot_fn(rbm4, rbm3, rbm2, rbm1)
 
     wtr = tf.summary.FileWriter("log/dbn/train")
     v = next(batchit4)
-    v = rbm4.pcd(sess, wtr, batchit4, steps= 600000, step_plot= 100000, lr= 0.01, v= v)
+    v = rbm4.pcd(sess, wtr, batchit4, steps= 60000, step_plot= 10000, lr= 0.01, v= v)
     v = rbm4.pcd(sess, wtr, batchit4, steps= 12000, step_plot= 3000, lr= 0.001, v= v)
     wtr.close()
 
