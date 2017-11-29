@@ -5,32 +5,38 @@ class Rbm(Record):
 
     def __init__(self, dv, dh
                  , bv= True, bh= True
+                 , sv= None, sh= None
                  , iw= tf.random_uniform_initializer(minval= -0.01, maxval= 0.01)
                  , ib= tf.zeros_initializer()
-                 , scope= 'rbm'):
+                 , scope= 'rbm'
+                 , dtype= 'float32'):
         self.dv, self.dh = dv, dh
         with tf.variable_scope(scope):
             self.r_ = tf.placeholder(name= 'r_', dtype= tf.float32)
             self.w = tf.get_variable(name= 'w', shape= (dv, dh), initializer= iw)
             if bh: self.bh = tf.get_variable(name= 'bh', shape= (1, dh), initializer= ib)
             if bv: self.bv = tf.get_variable(name= 'bv', shape= (1, dv), initializer= ib)
+            if sh: self.sh = tf.placeholder_with_default(name= 'sh', input= sh, shape= ())
+            if sv: self.sv = tf.placeholder_with_default(name= 'sv', input= sv, shape= ())
             self.v_ = tf.placeholder(name= 'v_', dtype= tf.float32, shape= (None, dv))
             with tf.name_scope('v2h'):
                 self.v2h = self.v_ @ self.w
                 if bh: self.v2h += self.bh
+                if sh: self.v2h *= self.sh
             with tf.name_scope('h'):
                 self.h = tf.cast(tf.less_equal(self.r_, tf.sigmoid(self.v2h)), tf.float32)
             self.h_ = tf.placeholder(name= 'h_', dtype= tf.float32, shape= (None, dh))
             with tf.name_scope('h2v'):
                 self.h2v = tf.matmul(self.h_, self.w, transpose_b= True)
                 if bv: self.h2v += self.bv
+                if sv: self.h2v *= self.sv
             with tf.name_scope('v'):
                 self.v = tf.cast(tf.less_equal(self.r_, tf.sigmoid(self.h2v)), tf.float32)
             with tf.name_scope('fe'):
                 self.fe = - tf.reduce_sum(tf.log1p(tf.exp(self.v2h)), axis= 1)
                 if bv: self.fe -= tf.matmul(self.v_, self.bv, transpose_b= True)
                 self.fe = tf.reduce_mean(self.fe)
-            self.lr_ = tf.placeholder(name= 'lr', dtype= tf.float32, shape= ())
+            self.lr_ = tf.placeholder(name= 'lr_', dtype= tf.float32, shape= ())
             with tf.name_scope('pos'):
                 self.pos = tf.train.GradientDescentOptimizer(self.lr_).minimize(self.fe)
             with tf.name_scope('neg'):
