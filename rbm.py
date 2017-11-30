@@ -1,118 +1,83 @@
-from utils import np, tf, tile, Record
+from utils import np, tf, Record, binary, binary_variable, plot_fn
 
 
 class Rbm(Record):
 
-    def __init__(self, dv, dh
-                 , bv= True, bh= True
-                 , sv= None, sh= None
-                 , iw= tf.random_uniform_initializer(minval= -0.01, maxval= 0.01)
-                 , ib= tf.zeros_initializer()
-                 , scope= 'rbm'
-                 , dtype= 'float32'):
-        self.dv, self.dh = dv, dh
+    def __init__(self, dim_v, dim_h, chains
+                 , init_w= tf.random_uniform_initializer(minval= -0.01, maxval= 0.01)
+                 , ftype= tf.float32
+                 , scope= 'rbm'):
+        self.dim_v, self.dim_h, self.ftype = dim_v, dim_h, ftype
         with tf.variable_scope(scope):
-            self.r_ = tf.placeholder(name= 'r_', dtype= tf.float32)
-            self.w = tf.get_variable(name= 'w', shape= (dv, dh), initializer= iw)
-            if bh: self.bh = tf.get_variable(name= 'bh', shape= (1, dh), initializer= ib)
-            if bv: self.bv = tf.get_variable(name= 'bv', shape= (1, dv), initializer= ib)
-            if sh: self.sh = tf.placeholder_with_default(name= 'sh', input= sh, shape= ())
-            if sv: self.sv = tf.placeholder_with_default(name= 'sv', input= sv, shape= ())
-            self.v_ = tf.placeholder(name= 'v_', dtype= tf.float32, shape= (None, dv))
-            with tf.name_scope('v2h'):
-                self.v2h = self.v_ @ self.w
-                if bh: self.v2h += self.bh
-                if sh: self.v2h *= self.sh
-            with tf.name_scope('h'):
-                self.h = tf.cast(tf.less_equal(self.r_, tf.sigmoid(self.v2h)), tf.float32)
-            self.h_ = tf.placeholder(name= 'h_', dtype= tf.float32, shape= (None, dh))
-            with tf.name_scope('h2v'):
-                self.h2v = tf.matmul(self.h_, self.w, transpose_b= True)
-                if bv: self.h2v += self.bv
-                if sv: self.h2v *= self.sv
-            with tf.name_scope('v'):
-                self.v = tf.cast(tf.less_equal(self.r_, tf.sigmoid(self.h2v)), tf.float32)
-            with tf.name_scope('fe'):
-                self.fe = - tf.reduce_sum(tf.log1p(tf.exp(self.v2h)), axis= 1)
-                if bv: self.fe -= tf.matmul(self.v_, self.bv, transpose_b= True)
-                self.fe = tf.reduce_mean(self.fe)
-            self.lr_ = tf.placeholder(name= 'lr_', dtype= tf.float32, shape= ())
+            self.w = tf.get_variable(name= 'w', shape= (self.dim_v, self.dim_h), initializer= init_w)
+            # positive stage: inference
+            self.v_ = tf.placeholder(name= 'v_', dtype= self.ftype, shape= (None, self.dim_v))
+            with tf.name_scope('hgv'):
+                self.hgv = tf.sigmoid(tf.matmul(self.v_, self.w))
+            # self.act_h = binary(self.hgv, transform= False, threshold= None)
+            # self.h_ = tf.placeholder(name= 'h_', dtype= self.ftype, shape= (None, self.dim_h))
+            # self.vgh = tf.matmul(self.h_, self.w, transpose_b= True)
+            # self.act_v = binary(self.vgh, transform= False, threshold= None)
+
             with tf.name_scope('pos'):
-                self.pos = tf.train.GradientDescentOptimizer(self.lr_).minimize(self.fe)
+                self.pos = tf.matmul(self.v_, self.hgv, transpose_a= True)
+                self.pos /= tf.cast(tf.shape(self.v_)[0], dtype= self.ftype)
+            # negative stage: stochastic approximation
+            self.v = binary_variable(name= 'v', shape= (chains, self.dim_v), dtype= self.ftype)
+            self.h = binary_variable(name= 'h', shape= (chains, self.dim_h), dtype= self.ftype)
+            self.k_ = tf.placeholder(name= 'k_', dtype= tf.int32, shape= ())
+
+            def gibbs(v, _h):
+                h = binary(tf.matmul(v, self.w))
+                v = binary(tf.matmul(h, self.w, transpose_b= True))
+                # todo try real
+                # v = tf.matmul(h, self.w, transpose_b= True)
+                return v, h
+
+            with tf.name_scope('gibbs'):
+                vh = self.v, self.h
+                v, h = self.gibbs = tuple(
+                    tf.assign(x, x2, validate_shape= False) for x, x2 in zip(
+                        vh, tf.while_loop(
+                            loop_vars= (self.k_, vh)
+                            , cond= lambda k, vh: (0 < k)
+                            , body= lambda k, vh: (k - 1, gibbs(*vh)))[1]))
+
             with tf.name_scope('neg'):
-                self.neg = tf.train.GradientDescentOptimizer(self.lr_).minimize(- self.fe)
-            self.summ_pos = tf.summary.scalar(name= "loss_pos".format(scope), tensor= self.fe)
-            self.summ_neg = tf.summary.scalar(name= "loss_neg".format(scope), tensor= self.fe)
-            self.recons_ = tf.placeholder(name= 'recons_', dtype= tf.float32, shape= (1, None, None, 1))
-            self.summ_recons = tf.summary.image(name= 'recons', tensor= self.recons_)
+                self.neg = tf.matmul(v, h, transpose_a= True)
+                self.neg /= tf.cast(tf.shape(v)[0], dtype= self.ftype)
+            self.lr_ = tf.placeholder(name= 'lr_', dtype= self.ftype, shape= ())
+            with tf.name_scope('up'):
+                self.up = self.w.assign_add((self.pos - self.neg) * self.lr_).op
             self.step = 0
 
-    def activate_h(self, sess, v):
-        return sess.run(self.h, feed_dict= {
-            self.r_: np.random.rand(len(v), self.dh)
-            , self.v_: v})
-
-    def activate_v(self, sess, h):
-        return sess.run(self.v, feed_dict= {
-            self.r_: np.random.rand(len(h), self.dv)
-            , self.h_: h})
-
-    def gibbs_update(self, sess, v):
-        return self.activate_v(sess, self.activate_h(sess, v))
-
-    def fit_pos(self, sess, v, lr= 0.01):
-        return sess.run((self.summ_pos, self.pos), feed_dict= {self.v_: v, self.lr_: lr})[0]
-
-    def fit_neg(self, sess, v, lr= 0.01):
-        return sess.run((self.summ_neg, self.neg), feed_dict= {self.v_: v, self.lr_: lr})[0]
-
-    def plot(self, sess, wtr, v, step= None):
-        wtr.add_summary(
-            sess.run(self.summ_recons, feed_dict= {self.recons_: tile(v)})
-            , self.step if step is None else step)
-
-    def cd(self, sess, wtr, batchit, steps, step_plot, k= 1, lr= 0.01):
+    def pcd(self, sess, wtr, batchit, k= 4, lr= 0.01, steps= 0, step_plot= 0, plot= plot_fn('recons')):
+        if not (plot and step_plot): step_plot = 1 + steps
         for step in range(1, 1 + steps):
             self.step += 1
-            wtr.add_summary(self.fit_pos(sess, next(batchit), lr), self.step)
-            v = next(batchit)
-            for _ in range(k): v = self.gibbs_update(sess, v)
+            # todo summarise loss
+            sess.run(self.up, feed_dict= {self.v_: next(batchit), self.k_: k, self.lr_: lr})
             if not (step % step_plot):
-                self.plot(sess, wtr, v)
-            wtr.add_summary(self.fit_neg(sess, v, lr), self.step)
-        return v
+                plot(sess, wtr, sess.run(self.v), self.step)
 
-    def pcd(self, sess, wtr, batchit, steps, step_plot, k= 1, lr= 0.01, v= None):
-        if v is None: v = next(batchit)
-        for step in range(1, 1 + steps):
-            self.step += 1
-            wtr.add_summary(self.fit_pos(sess, next(batchit), lr), self.step)
-            for _ in range(k): v = self.gibbs_update(sess, v)
-            if not (step % step_plot):
-                self.plot(sess, wtr, v)
-            wtr.add_summary(self.fit_neg(sess, v, lr), self.step)
-        return v
+    def gen(self, sess, k= 4, v= None, ret_v= True, ret_h= False):
+        if v is not None: sess.run(tf.assign(self.v, v, validate_shape= False))
+        if ret_v and ret_h:
+            ret = self.gibbs
+        elif ret_v:
+            ret = self.gibbs[0]
+        elif ret_h:
+            ret = self.gibbs[1]
+        else:
+            raise StopIteration("not ret_v and not ret_h")
+        while True: yield sess.run(ret, feed_dict= {self.k_: k})
 
-    def gen(self, sess, k= 1, v= None, n= None):
-        """either `v` or `n` must be provided."""
-        if v is None: v = np.random.randint(2, size= (n, self.dv), dtype= np.bool)
-        while True:
-            for _ in range(k):
-                h = self.activate_h(sess, v)
-                v = self.activate_v(sess, h)
-            yield h, v
-
-    def gen_v(self, sess, k= 1, v= None, n= None):
-        return map(lambda hv: hv[1], self.gen(sess, k, v, n))
-
-    def gen_h(self, sess, k= 1, v= None, n= None):
-        return map(lambda hv: hv[0], self.gen(sess, k, v, n))
 
 if False:
     from utils import mnist
     batchit = mnist(batch_size= 100, ds= 'train', with_labels= False, binary= True)
 
-    rbm = Rbm(28*28, 210)
+    rbm = Rbm(28*28, 512, chains= 100)
     sess = tf.InteractiveSession()
     sess.run(tf.global_variables_initializer())
 
@@ -121,14 +86,14 @@ if False:
     # tf.reset_default_graph()
     # sess.close()
 
-    wtr = tf.summary.FileWriter("log/rbm/train")
-    v = next(batchit1)
-    v = rbm1.pcd(sess, wtr, batchit1, steps= 60000, step_plot= 10000, lr= 0.01, v= v)
-    v = rbm1.pcd(sess, wtr, batchit1, steps= 12000, step_plot= 3000, lr= 0.001, v= v)
+    wtr = tf.summary.FileWriter("log/rbm")
+    rbm.pcd(sess, wtr, batchit, k= 4, lr= 0.01, steps= 60000, step_plot= 10000)
+    rbm.pcd(sess, wtr, batchit, k= 4, lr= 0.001, steps= 12000, step_plot= 3000)
     wtr.close()
 
-    with tf.summary.FileWriter("log/rbm/gen1k") as wtr:
-        for step, v in zip(range(10), rbm.gen_v(sess, k= 1000, v= v)):
-            rbm.plot(sess, wtr, v, step)
+    plot = plot_fn('gen1k')
+    with tf.summary.FileWriter("log/rbm") as wtr:
+        for step, v in zip(range(10), rbm.gen(sess, k= 1000, v= next(batchit))):
+            plot(sess, wtr, v, step)
 
     tf.train.Saver().save(sess, "./models/rbm")

@@ -1,128 +1,110 @@
-from dbn import plot_fn
-from functools import reduce, partial
-from itertools import product
 from rbm import Rbm
-from utils import np, tf, tile, Record
+from utils import np, tf, tile, Record, binary, binary_variable, plot_fn
 
 
 class Dbm(Record):
 
-    def __init__(self, dim, scope= 'dbm', dtype= 'float32'):
-        self.dim, self.dtype = dim, dtype
-        two = np.array(2, dtype= self.dtype)
-        rbm = [Rbm(scope= 'rbm1', dv= dim[0], dh= dim[1], bv= False, bh= False, sh= two)]
-        for i, (dv, dh) in enumerate(zip(dim[1:-2], dim[2:-1]), 2):
-            rbm.append(Rbm(scope= "rbm{}".format(i), dv= dv, dh= dh, bv= False, bh= False, sv= two, sh= two))
-            rbm[-1].plot = plot_fn(*rbm[::-1])
-        rbm.append(Rbm(scope= 'rbm0', dv= dim[-2], dh= dim[-1], bv= False, bh= False, sv= two))
-        rbm[-1].plot = plot_fn(*rbm[::-1])
-        self.rbm = tuple(rbm)
-        self.w = tuple(rbm.w for rbm in self.rbm)
+    def __init__(self, dim, chains
+                 , init_w= tf.random_uniform_initializer(minval= -0.01, maxval= 0.01)
+                 , ftype= tf.float32, scope= 'dbm'):
+        self.dim, self.ftype = dim, ftype
+        # todo pretraining
         with tf.variable_scope(scope):
-            self.lr_ = tf.placeholder(name= 'lr_', dtype= self.dtype, shape= ())
-            self.bs_ = tf.placeholder(name= 'bs_', dtype= tf.int32, shape= ())
-            im = tf.random_uniform_initializer(dtype= self.dtype)
-            self.m = tuple(
-                tf.get_variable(
-                    name= "m{}".format(i)
-                    , shape= (1, dim)
-                    , validate_shape= False
-                    , initializer= im)
-                for i, dim in enumerate(self.dim[1:]))
-            ih = lambda *args, **kwargs: tf.round(im(*args, **kwargs))
-            self.h = tuple(
-                tf.get_variable(
-                    name= "h{}".format(i)
-                    , shape= (1, dim)
-                    , validate_shape= False
-                    , initializer= ih)
-                for i, dim in enumerate(self.dim[1:]))
+            self.rbm = tuple(
+                Rbm(scope= "rbm{}".format(i)
+                    , dim_v= dim_v
+                    , dim_h= dim_h
+                    , chains= chains
+                    , init_w= init_w
+                    , ftype= self.ftype)
+                for i, (dim_v, dim_h) in enumerate(zip(dim, dim[1:]), 1))
+            self.w = tuple(rbm.w for rbm in self.rbm)
+            # positive stage: variational inference
+            self.m = tuple(rbm.h for rbm in self.rbm)
             self.v_ = self.rbm[0].v_
             self.k_meanf_ = tf.placeholder(name= 'k_meanf_', dtype= tf.int32, shape= ())
+
+            def meanf(m):
+                mf, ml = [], self.v_
+                for wl, wr, mr in zip(self.w, self.w[1:], m[1:]):
+                    mf.append(tf.sigmoid(tf.matmul(ml, wl) + tf.matmul(mr, wr, transpose_b= True)))
+                    ml = mf[-1]
+                mf.append(tf.sigmoid(tf.matmul(ml, wr)))
+                return tuple(mf)
+
+            with tf.name_scope('meanf'):
+                self.meanf = tuple(
+                    tf.assign(m, mf, validate_shape= False) for m, mf in zip(
+                        self.m, tf.while_loop(
+                            loop_vars= (self.k_meanf_, self.m)
+                            , cond= lambda k, _: (0 < k)
+                            , body= lambda k, m: (k - 1, meanf(m)))[1]))
+
+            with tf.name_scope('pos'):
+                bs = tf.cast(tf.shape(self.v_)[0], dtype= self.ftype)
+                vm = (self.v_,) + self.meanf
+                self.pos = tuple((tf.matmul(ml, mr, transpose_a= True) / bs) for ml, mr in zip(vm, vm[1:]))
+            # negative stage: stochastic approximation
+            self.x = tuple(rbm.v for rbm in self.rbm)
+            self.x += (binary_variable(name= 'x', shape= (chains, self.dim[-1]), dtype= self.ftype),)
+            self.v = self.x[0]
             self.k_gibbs_ = tf.placeholder(name= 'k_gibbs_', dtype= tf.int32, shape= ())
-            self.v = tf.get_variable(name= 'v', shape= (1, dim[0]), validate_shape= False, initializer= ih)
-            # variational inference
-            meanf, m0 = [], self.v_
-            for m2, w0, w2 in zip(self.m[1:], self.w, self.w[1:]):
-                m1 = tf.sigmoid(tf.matmul(m0, w0) + tf.matmul(m2, w2, transpose_b= True))
-                meanf.append(m1)
-                m0 = m1
-            meanf.append(tf.sigmoid(tf.matmul(meanf[-1], self.w[-1])))
-            self.meanf = tuple(tf.assign(m, mf, validate_shape= False) for m, mf in zip(self.m, tf.while_loop(
-                name= 'meanf'
-                , cond= lambda _, k: 0 < k
-                , body= lambda m, k: (tuple(meanf), k - 1)
-                , loop_vars= (self.m, self.k_meanf_))[0]))
-            # stochastic approximation
-            gibbs, h0 = [], self.v
-            for h2, w0, w2, dim in zip(self.h[1:], self.w, self.w[1:], self.dim[1:]):
-                h1 = tf.cast(
-                    tf.random_uniform(shape= (self.bs_, dim))
-                    <= tf.sigmoid(tf.matmul(h0, w0) + tf.matmul(h2, w2, transpose_b= True))
-                    , dtype= self.dtype)
-                gibbs.append(h1)
-                h0 = h1
-            gibbs.append(tf.cast(
-                tf.random_uniform(shape= (self.bs_, self.dim[-1]))
-                <= tf.sigmoid(tf.matmul(gibbs[-1], self.w[-1]))
-                , dtype= self.dtype))
-            gibbs.append(tf.cast(
-                tf.random_uniform(shape= (self.bs_, self.dim[0]))
-                <= tf.sigmoid(tf.matmul(gibbs[0], self.w[0], transpose_b= True))
-                , dtype= self.dtype))
-            hv = self.h + (self.v, )
-            self.gibbs = tuple(tf.assign(x, xg, validate_shape= False) for x, xg in zip(hv, tf.while_loop(
-                name= 'gibbs'
-                , cond= lambda _, k: 0 < k
-                , body= lambda h, k: (tuple(gibbs), k - 1)
-                , loop_vars= (hv, self.k_gibbs_))[0]))
+
+            def gibbs(x):
+                x = list(x)
+                # update odd layers
+                for i, (xl, xr, wl, wr) in enumerate(zip(x[::2], x[2::2], self.w, self.w[1:])):
+                    x[1+(2*i)] = binary(tf.matmul(xl, wl) + tf.matmul(xr, wr, transpose_b= True))
+                # update first layer
+                x[0] = binary(tf.matmul(x[1], self.w[0], transpose_b= True))
+                # update even layers
+                for i, (xl, xr, wl, wr) in enumerate(zip(x[1::2], x[3::2], self.w[1:], self.w[2:])):
+                    x[2+(2*i)] = binary(tf.matmul(xl, wl) + tf.matmul(xr, wr, transpose_b= True))
+                # update last layer
+                x[-1] = binary(tf.matmul(x[-2], self.w[-1]))
+                return tuple(x)
+
+            with tf.name_scope('gibbs'):
+                x = self.gibbs = tuple(
+                    tf.assign(x, xg, validate_shape= False) for x, xg in zip(
+                        self.x, tf.while_loop(
+                            loop_vars= (self.k_gibbs_, self.x)
+                            , cond= lambda k, x: (0 < k)
+                            , body= lambda k, x: (k - 1, gibbs(x)))[1]))
+
+            with tf.name_scope('neg'):
+                bs = tf.cast(tf.shape(self.v)[0], dtype= self.ftype)
+                self.neg = tuple((tf.matmul(xl, xr, transpose_a= True) / bs) for xl, xr in zip(x, x[1:]))
             # parameter update
-            vm = (self.v_,) + self.meanf
-            vh = self.gibbs[-1:] + self.gibbs[:-1]
-            self.up = tuple(
-                w.assign_add(
-                    (tf.matmul(m1, m2, transpose_a= True) - tf.matmul(x1, x2, transpose_a= True))
-                    * (self.lr_ / tf.cast(self.bs_, dtype= self.dtype))).op
-                for w, m1, m2, x1, x2 in zip(self.w, vm, vm[1:], vh, vh[1:]))
+            self.lr_ = tf.placeholder(name= 'lr_', dtype= self.ftype, shape= ())
+            with tf.name_scope('up'):
+                self.up = tuple(
+                    w.assign_add((pos - neg) * self.lr_).op
+                    for w, pos, neg in zip(self.w, self.pos, self.neg))
             self.step = 0
-            self.recons_ = tf.placeholder(name= 'recons_', dtype= tf.float32, shape= (1, None, None, 1))
-            self.summ_recons = tf.summary.image(name= 'recons', tensor= self.recons_)
 
-    def pretrain(self, sess, wtr, batchit, steps, step_plot, lr= 0.01):
-        for rbm in self.rbm:
-            v = next(batchit)
-            v = rbm.pcd(sess, wtr, batchit, steps= steps, step_plot= step_plot, lr= lr, v= v)
-            # batchit = rbm.gen_h(sess, v= v)
-            batchit = map(partial(rbm.activate_h, sess), batchit)
-
-    def plot(self, sess, wtr, v, step= None):
-        wtr.add_summary(
-            sess.run(self.summ_recons, feed_dict= {self.recons_: tile(v)})
-            , self.step if step is None else step)
-
-    def pcd(self, sess, wtr, batchit, steps, step_plot, k_meanf= 4, k_gibbs= 4, lr= 0.01):
+    def pcd(self, sess, wtr, batchit, k_meanf= 9, k_gibbs= 9, lr= 0.01, steps= 0, step_plot= 0, plot= plot_fn('recons')):
+        if not (plot and step_plot): step_plot = 1 + steps
         for step in range(1, 1 + steps):
             self.step += 1
-            v = next(batchit)
+            # todo summarise loss
             sess.run(self.up, feed_dict= {
-                self.v_: v
-                , self.bs_: len(v)
-                , self.lr_: lr
+                self.v_: next(batchit)
                 , self.k_meanf_: k_meanf
-                , self.k_gibbs_: k_gibbs})
+                , self.k_gibbs_: k_gibbs
+                , self.lr_: lr})
             if not (step % step_plot):
-                self.plot(sess, wtr, sess.run(self.v))
+                plot(sess, wtr, sess.run(self.v), self.step)
 
     def gen(self, sess, k_gibbs= 4):
-        return sess.run(self.gibbs[-1], feed_dict= {self.k_gibbs_: k_gibbs})
+        while True: yield sess.run(self.gibbs[0], feed_dict= {self.k_gibbs_: k_gibbs})
 
 
 if False:
     from utils import mnist
     batchit = mnist(batch_size= 100, ds= 'train', with_labels= False, binary= True)
 
-    dbm = Dbm((784, 256, 256, 784))
-
+    dbm = Dbm((784, 256, 256, 784), chains= 100)
     sess = tf.InteractiveSession()
     sess.run(tf.global_variables_initializer())
 
@@ -134,10 +116,12 @@ if False:
     # with tf.summary.FileWriter("log/dbm/pretrain") as wtr:
     #     dbm.pretrain(sess, wtr, batchit, steps= 10000, step_plot= 10000)
 
-    with tf.summary.FileWriter("log/dbm/train") as wtr:
-        dbm.pcd(sess, wtr, batchit, steps= 6000, step_plot= 600)
-
-    with tf.summary.FileWriter("log/dbm/train2") as wtr:
+    with tf.summary.FileWriter("log/dbm") as wtr:
         dbm.pcd(sess, wtr, batchit, steps= 60000, step_plot= 6000)
 
-    # tf.train.Saver().save(sess, "./models/dbm")
+    plot = plot_fn('gen1k')
+    with tf.summary.FileWriter("log/dbm") as wtr:
+        for step, v in zip(range(10), dbm.gen(sess, k_gibbs= 1000)):
+            plot(sess, wtr, v, step)
+
+    tf.train.Saver().save(sess, "./models/dbm")
