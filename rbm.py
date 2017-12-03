@@ -3,12 +3,13 @@ from utils import np, tf, Record, binary, binary_variable, plot_fn
 
 class Rbm(Record):
 
-    def __init__(self, dim_v, dim_h, chains
+    def __init__(self, dim_v, dim_h, samples
                  , init_w= tf.random_uniform_initializer(minval= -0.01, maxval= 0.01)
                  , ftype= tf.float32
                  , scope= 'rbm'):
-        self.dim_v, self.dim_h, self.ftype = dim_v, dim_h, ftype
+        self.dim_v, self.dim_h, self.ftype, self.scope = dim_v, dim_h, ftype, scope
         with tf.variable_scope(scope):
+            # todo add bias
             self.w = tf.get_variable(name= 'w', shape= (self.dim_v, self.dim_h), initializer= init_w)
             # positive stage: inference
             self.v_ = tf.placeholder(name= 'v_', dtype= self.ftype, shape= (None, self.dim_v))
@@ -23,15 +24,15 @@ class Rbm(Record):
                 self.pos = tf.matmul(self.v_, self.hgv, transpose_a= True)
                 self.pos /= tf.cast(tf.shape(self.v_)[0], dtype= self.ftype)
             # negative stage: stochastic approximation
-            self.v = binary_variable(name= 'v', shape= (chains, self.dim_v), dtype= self.ftype)
-            self.h = binary_variable(name= 'h', shape= (chains, self.dim_h), dtype= self.ftype)
+            self.v = binary_variable(name= 'v', shape= (samples, self.dim_v), dtype= self.ftype)
+            self.h = binary_variable(name= 'h', shape= (samples, self.dim_h), dtype= self.ftype)
             self.k_ = tf.placeholder(name= 'k_', dtype= tf.int32, shape= ())
 
             def gibbs(v, _h):
                 h = binary(tf.matmul(v, self.w))
                 v = binary(tf.matmul(h, self.w, transpose_b= True))
-                # todo try real
-                # v = tf.matmul(h, self.w, transpose_b= True)
+                # todo real valued v
+                # v = tf.sigmoid(tf.matmul(h, self.w, transpose_b= True))
                 return v, h
 
             with tf.name_scope('gibbs'):
@@ -44,8 +45,11 @@ class Rbm(Record):
                             , body= lambda k, vh: (k - 1, gibbs(*vh)))[1]))
 
             with tf.name_scope('neg'):
+                # todo update with real probabilities instead of binaries
+                h = tf.sigmoid(tf.matmul(v, self.w))
+                v = tf.sigmoid(tf.matmul(h, self.w, transpose_b= True))
                 self.neg = tf.matmul(v, h, transpose_a= True)
-                self.neg /= tf.cast(tf.shape(v)[0], dtype= self.ftype)
+                self.neg /= tf.cast(tf.shape(self.v)[0], dtype= self.ftype)
             self.lr_ = tf.placeholder(name= 'lr_', dtype= self.ftype, shape= ())
             with tf.name_scope('up'):
                 self.up = self.w.assign_add((self.pos - self.neg) * self.lr_).op
@@ -77,7 +81,7 @@ if False:
     from utils import mnist
     batchit = mnist(batch_size= 100, ds= 'train', with_labels= False, binary= True)
 
-    rbm = Rbm(28*28, 512, chains= 100)
+    rbm = Rbm(28*28, 512, samples= 100)
     sess = tf.InteractiveSession()
     sess.run(tf.global_variables_initializer())
 

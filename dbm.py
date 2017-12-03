@@ -1,10 +1,10 @@
 from rbm import Rbm
-from utils import np, tf, tile, Record, binary, binary_variable, plot_fn
+from utils import np, tf, Record, binary, binary_variable, plot_fn
 
 
 class Dbm(Record):
 
-    def __init__(self, dim, chains
+    def __init__(self, dim, samples
                  , init_w= tf.random_uniform_initializer(minval= -0.01, maxval= 0.01)
                  , ftype= tf.float32, scope= 'dbm'):
         self.dim, self.ftype = dim, ftype
@@ -14,7 +14,7 @@ class Dbm(Record):
                 Rbm(scope= "rbm{}".format(i)
                     , dim_v= dim_v
                     , dim_h= dim_h
-                    , chains= chains
+                    , samples= samples
                     , init_w= init_w
                     , ftype= self.ftype)
                 for i, (dim_v, dim_h) in enumerate(zip(dim, dim[1:]), 1))
@@ -46,7 +46,7 @@ class Dbm(Record):
                 self.pos = tuple((tf.matmul(ml, mr, transpose_a= True) / bs) for ml, mr in zip(vm, vm[1:]))
             # negative stage: stochastic approximation
             self.x = tuple(rbm.v for rbm in self.rbm)
-            self.x += (binary_variable(name= 'x', shape= (chains, self.dim[-1]), dtype= self.ftype),)
+            self.x += (binary_variable(name= 'x', shape= (samples, self.dim[-1]), dtype= self.ftype),)
             self.v = self.x[0]
             self.k_gibbs_ = tf.placeholder(name= 'k_gibbs_', dtype= tf.int32, shape= ())
 
@@ -104,7 +104,7 @@ if False:
     from utils import mnist
     batchit = mnist(batch_size= 100, ds= 'train', with_labels= False, binary= True)
 
-    dbm = Dbm((784, 256, 256, 784), chains= 100)
+    dbm = Dbm((784, 256, 256, 784), samples= 100)
     sess = tf.InteractiveSession()
     sess.run(tf.global_variables_initializer())
 

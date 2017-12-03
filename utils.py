@@ -47,9 +47,10 @@ def tile(images, cols= None, width= 28, channels= 1):
         , axis= 2)
 
 
-def plot_fn(name, plot= tf.placeholder(dtype= tf.float32, shape= (1, None, None, 1))):
+def plot_fn(name):
+    plot = tf.placeholder(dtype= tf.float32, shape= (1, None, None, 1))
     summary = tf.summary.image(name= name, tensor= plot)
-    return lambda sess, wtr, v, step: wtr.add_summary(
+    return lambda sess, wtr, v, step= None: wtr.add_summary(
         sess.run(summary, feed_dict= {plot: tile(v)})
         , global_step= step)
 
