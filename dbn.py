@@ -18,39 +18,48 @@ class Dbn(Record):
                     , init_w= init_w
                     , ftype= self.ftype)
                 for i, (dim_v, dim_h) in enumerate(zip(dim, dim[1:]), 1))
-            self.w = tuple(rbm.w for rbm in self.rbm)
+            self.w = tuple(rbm.w for rbm in self.rbm[::-1])
+            self.wg = tuple(tf.transpose(w) for w in self.w)
+            self.wr = tuple(
+                tf.get_variable(name= "wr{}".format(i), shape= (dim_d, dim_a), initializer= init_w)
+                for i, (dim_d, dim_a) in enumerate(zip(self.dim, self.dim[1:]), 1))
+            self.lr_ = tf.placeholder(name= 'lr_', dtype= self.ftype, shape= ())
             # wake
             self.v_ = self.rbm[0].v_
             with tf.name_scope('wake'):
-                wake = [self.v_]
-                for w in self.w:
-                    wake.append(tf.sigmoid(tf.matmul(wake[-1], w)))
-                self.wake = tuple(wake)
-            with tf.name_scope('pos'):
-                bs = tf.cast(tf.shape(self.wake[0])[0], dtype= self.ftype)
-                self.pos = tuple(
-                    (tf.matmul(d, a, transpose_a= True) / bs)
-                    for d, a in zip(self.wake, self.wake[1:]))
+                recogn = [self.v_]
+                for w in self.wr: recogn.append(binary(tf.matmul(recogn[-1], w)))
+                self.recogn = tuple(recogn)
+                recogn = recogn[::-1]
+                eps = self.lr_ / tf.cast(tf.shape(self.v_)[0], dtype= self.ftype)
+                self.wake = tuple(
+                    w.assign_add(tf.matmul((sj - pj), sk, transpose_a= True) * eps).op
+                    for w, sk, sj, pj in zip(
+                            self.w, recogn, recogn[1:]
+                            , (tf.sigmoid(tf.matmul(s, w))
+                               for w, s in zip(self.wg, recogn))))
             # sleep
             top = self.rbm[-1]
-            self.k_ = top.k_
+            self.k_, (self.v, self.a) = top.k_, top.gibbs
             with tf.name_scope('sleep'):
-                sleep = list(top.gibbs[::-1])
-                for w in self.w[-2::-1]:
-                    sleep.append(binary(tf.matmul(sleep[-1], w, transpose_b= True)))
-                self.sleep = tuple(sleep[::-1])
-            self.v, self.a = self.sleep[0], self.sleep[-1]
-            with tf.name_scope('neg'):
-                bs = tf.cast(tf.shape(self.sleep[-1])[0], dtype= self.ftype)
-                self.neg = tuple(
-                    (tf.matmul(d, a, transpose_a= True) / bs)
-                    for d, a in zip(self.sleep, self.sleep[1:]))
-            # parameter update
-            self.lr_ = tf.placeholder(name= 'lr_', dtype= self.ftype, shape= ())
-            with tf.name_scope('up'):
-                self.up = tuple(
-                    w.assign_add((pos - neg) * self.lr_).op
-                    for w, pos, neg in zip(self.w, self.pos, self.neg))
+                recons = [self.a, self.v]
+                for w in self.wg[1::]: recons.append(binary(tf.matmul(recons[-1], w)))
+                self.recons = tuple(recons)
+                recons = recons[::-1]
+                eps = self.lr_ / tf.cast(tf.shape(self.a)[0], dtype= self.ftype)
+                self.sleep = tuple(
+                    w.assign_add(tf.matmul(sj, (sk - qk), transpose_a= True) * eps).op
+                    for w, sj, sk, qk in zip(
+                            self.wr, recons, recons[1:]
+                            , (tf.sigmoid(tf.matmul(s, w))
+                               for w, s in zip(self.wr, recons))))
+            # the waking world is the amnesia of dream.
+            self.v = self.recons[-1]
+            with tf.name_scope('ances'):
+                self.a = self.rbm[-1].h
+                ances = [self.a]
+                for w in self.wg: ances.append(binary(tf.matmul(ances[-1], w)))
+                self.ances = ances[-1]
             self.step = 0
 
     def fit(self, sess, wtr, batchit, k= 4, lr= 0.01, steps= 0, step_plot= 0, plot= plot_fn('recons')):
@@ -58,17 +67,18 @@ class Dbn(Record):
         for step in range(1, 1 + steps):
             self.step += 1
             # todo summarise loss
-            sess.run(self.up, feed_dict= {self.v_: next(batchit), self.k_: k, self.lr_: lr})
+            sess.run(self.wake, feed_dict= {self.v_: next(batchit), self.lr_: lr})
+            sess.run(self.sleep, feed_dict= {self.k_: k, self.lr_: lr})
             if not (step % step_plot):
                 plot(sess, wtr, sess.run(self.v, feed_dict= {self.k_: k}), self.step)
 
     def ans(self, sess, a):
-        return sess.run(self.v, feed_dict= {self.a: a, self.k_: 1})
+        return sess.run(self.ances, feed_dict= {self.a: a})
 
     def gen(self, sess, k= 4):
         while True: yield sess.run(self.v, feed_dict= {self.k_: k})
 
-    def pre(self, sess, wtr, batchit, k= 4, lr= 0.01, steps= 0, step_plot= 0):
+    def pre(self, sess, wtr, batchit, k= 4, lr= 0.01, steps= 0, step_plot= 0, sleep= 0):
         h2v = lambda x: x
         for rbm in self.rbm:
             # plot function from this rbm down to the bottom
@@ -87,6 +97,7 @@ class Dbn(Record):
             rbm.v2h = binary(rbm.hgv, transform= False, threshold= False)
             v2h = lambda v, rbm= rbm: sess.run(rbm.v2h, feed_dict= {rbm.v_: v})
             batchit = map(v2h, batchit)
+        for _ in range(sleep): sess.run(self.sleep, feed_dict= {self.k_: k, self.lr_: lr})
 
 
 if False:
@@ -103,8 +114,8 @@ if False:
     # sess.close()
 
     wtr = tf.summary.FileWriter("log/dbn/train")
-    dbn.pre(sess, wtr, batchit, k= 4, lr= 0.01, steps= 60000, step_plot= 6000)
-    dbn.fit(sess, wtr, batchit, k= 4, lr= 0.01, steps= 60000, step_plot= 6000)
+    dbn.pre(sess, wtr, batchit, k= 4, lr= 0.01, steps= 60000, step_plot= 6000, sleep= 6000)
+    dbn.fit(sess, wtr, batchit, k= 4, lr= 0.01, steps= 360000, step_plot= 36000)
     wtr.close()
 
     plot = plot_fn('gen')
